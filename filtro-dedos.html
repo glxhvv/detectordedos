@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Filtro entre dedos</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#111; color:#eee; font-family:system-ui,sans-serif;
+         display:flex; flex-direction:column; align-items:center; gap:12px; padding:16px; }
+  #wrap { position:relative; width:min(100%,960px); aspect-ratio:4/3; background:#000; border-radius:12px; overflow:hidden; }
+  canvas { width:100%; height:100%; display:block; }
+  #msg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+         text-align:center; padding:20px; background:rgba(0,0,0,.6); }
+  .bar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:center; }
+  button { background:#2a2a2a; color:#eee; border:1px solid #555; padding:8px 14px; border-radius:8px; cursor:pointer; font-size:15px; }
+  button.on { background:#4f8cff; border-color:#4f8cff; color:#fff; }
+  small { opacity:.7; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="960" height="720"></canvas>
+  <div id="msg">Cargando cámara y detector de manos…</div>
+</div>
+<div class="bar">
+  <button id="bw" class="on">Blanco y negro</button>
+  <button id="px">Pixeleado</button>
+  <label>Tamaño píxel <input id="size" type="range" min="6" max="40" value="16"></label>
+</div>
+<small>Forma una "L" con pulgar e índice de cada mano y enmarca lo que quieras filtrar.</small>
+
+<script>
+const W = 960, H = 720;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+const msg = document.getElementById('msg');
+const video = document.createElement('video');
+video.playsInline = true; video.muted = true;
+
+const off = document.createElement('canvas'); off.width = W; off.height = H;
+const offCtx = off.getContext('2d', { willReadFrequently: true });
+const small = document.createElement('canvas');
+const smallCtx = small.getContext('2d');
+
+let mode = 'bw';
+const bwBtn = document.getElementById('bw'), pxBtn = document.getElementById('px');
+function setMode(m) { mode = m; bwBtn.classList.toggle('on', m==='bw'); pxBtn.classList.toggle('on', m==='px'); }
+bwBtn.onclick = () => setMode('bw');
+pxBtn.onclick = () => setMode('px');
+
+let hands = [];
+
+// Ordena puntos alrededor de su centro para formar un polígono sin cruces
+function orderPoints(pts) {
+  const cx = pts.reduce((s,p)=>s+p.x,0)/pts.length;
+  const cy = pts.reduce((s,p)=>s+p.y,0)/pts.length;
+  return pts.slice().sort((a,b)=>Math.atan2(a.y-cy,a.x-cx)-Math.atan2(b.y-cy,b.x-cx));
+}
+const toPx = l => ({ x:(1-l.x)*W, y:l.y*H });   // espejo
+
+function applyFilter(poly) {
+  // copia del frame actual
+  offCtx.drawImage(canvas, 0, 0);
+  if (mode === 'bw') {
+    const img = offCtx.getImageData(0,0,W,H), d = img.data;
+    for (let i=0;i<d.length;i+=4) {
+      let g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+      g = (g-128)*1.25+128; g = g<0?0:g>255?255:g;
+      d[i]=d[i+1]=d[i+2]=g;
+    }
+    offCtx.putImageData(img,0,0);
+  } else {
+    const s = +document.getElementById('size').value;
+    small.width = Math.ceil(W/s); small.height = Math.ceil(H/s);
+    smallCtx.drawImage(canvas, 0, 0, small.width, small.height);
+    offCtx.imageSmoothingEnabled = false;
+    offCtx.drawImage(small, 0, 0, small.width, small.height, 0, 0, small.width*s, small.height*s);
+  }
+  ctx.save();
+  ctx.beginPath();
+  poly.forEach((p,i)=> i ? ctx.lineTo(p.x,p.y) : ctx.moveTo(p.x,p.y));
+  ctx.closePath(); ctx.clip();
+  ctx.drawImage(off, 0, 0);
+  ctx.restore();
+}
+
+function draw() {
+  // video espejado
+  ctx.save(); ctx.translate(W,0); ctx.scale(-1,1);
+  ctx.drawImage(video, 0, 0, W, H); ctx.restore();
+
+  // puntas: pulgar (4) e índice (8) de cada mano
+  const tips = [];
+  hands.forEach(h => { tips.push(toPx(h[4]), toPx(h[8])); });
+
+  if (tips.length === 4) {
+    const poly = orderPoints(tips);
+    applyFilter(poly);
+    ctx.strokeStyle = '#4f8cff'; ctx.lineWidth = 3;
+    ctx.beginPath(); poly.forEach((p,i)=> i ? ctx.lineTo(p.x,p.y) : ctx.moveTo(p.x,p.y));
+    ctx.closePath(); ctx.stroke();
+  }
+  // marcadores en las puntas y línea de cada dedo
+  hands.forEach(h => {
+    [[2,4],[5,8]].forEach(([base,tip]) => {
+      const a = toPx(h[base]), b = toPx(h[tip]);
+      ctx.strokeStyle = '#ffd84f'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+      ctx.fillStyle = '#ff4f6a'; ctx.beginPath(); ctx.arc(b.x,b.y,7,0,Math.PI*2); ctx.fill();
+    });
+  });
+  requestAnimationFrame(draw);
+}
+
+async function start() {
+  const hd = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
+  hd.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+  hd.onResults(r => { hands = r.multiHandLandmarks || []; });
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 960, height: 720 }, audio: false });
+    video.srcObject = stream; await video.play();
+  } catch (e) {
+    msg.textContent = 'No se pudo acceder a la cámara: ' + e.message; return;
+  }
+  msg.style.display = 'none';
+  draw();
+  (async function loop() {
+    if (video.readyState >= 2) await hd.send({ image: video });
+    requestAnimationFrame(loop);
+  })();
+}
+start();
+</script>
+</body>
+</html>
